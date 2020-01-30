@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Created-By: danieljyc
+Premain-Class: com.danieljyc.agent.premain.PremainMain
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true

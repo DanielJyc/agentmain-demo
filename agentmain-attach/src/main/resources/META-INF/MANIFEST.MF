@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Created-By: danieljyc
+Agent-Class: com.danieljyc.agent.attach.AttachAgent
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true
