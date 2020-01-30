@@ -1,4 +1,4 @@
-# Java Agent 之二：进阶实例
+# 动态编程之三：Java Agent 进阶实例(javassist方式)
 
 上一篇讲了premain方式的一个简单实例，且不需要mvn构建。本篇首先将通过mvn依赖的方式来对agent进行打包，讲解premain模式；然后，再进一步讲解attach模式。
 <a name="6WMZU"></a>
@@ -317,3 +317,252 @@ insert code ...
 
 - [Java Agent实战](https://blog.csdn.net/manzhizhen/article/details/100178857)
 
+
+
+
+# 动态编程之四：Java Agent 动态获取指定函数入参和返回结果(javassist方式)
+
+本文章将介绍通过Java Agent和javassist技术，在不侵入程序代码，且Java程序不重启的情况下，动态获取指定函数入参和返回结果。
+<a name="qIoc5"></a>
+# 实现
+<a name="slpjp"></a>
+## 应用模块agentmain-app
+文档结构代码结构：
+```shell
+agentmain-app
+├── pom.xml
+├── src
+│   └── main
+│       ├── java
+│       │   ├── ProducerApplication.java
+│       │   └── ProductModel.java
+│       └── resources
+│           └── META-INF
+```
+
+关键文件ProducerApplication.java代码如下。启动后，将持续生产产品
+```java
+public class ProducerApplication {
+
+    public static void main(String[] args) {
+        int count = 1;
+        System.out.println("start execute main function.\n");
+        while (true) {
+            produceProduct(new ProductModel(count++, "pcode", "pname"));
+        }
+    }
+
+    private static void produceProduct(ProductModel productModel) {
+        System.out.println("生产完成" + productModel.getId() + " 件。");
+        try {
+            TimeUnit.SECONDS.sleep(2);
+        } catch (InterruptedException e) {
+        }
+    }
+}
+```
+<a name="CFdTj"></a>
+## agent模块：agentmain-attach
+文档结构：
+```
+agentmain-attach
+├── pom.xml
+├── src
+│   ├── main
+│   │   ├── java
+│   │   │   └── com
+│   │   │       └── danieljyc
+│   │   │           └── agent
+│   │   │               ├── attach
+│   │   │               │   └── AttachAgent.java
+│   │   │               └── transformer
+│   │   │                   └── ProducerTransformer.java
+│   │   └── resources
+│   │       └── META-INF
+│   │           └── MANIFEST.MF
+```
+
+- ProducerTransformer.java: 打印所有入参，并打印所有返回结果
+```java
+public class ProducerTransformer implements ClassFileTransformer {
+
+    @Override
+    public byte[] transform(ClassLoader loader, String className,
+                            Class<?> classBeingRedefined,
+                            ProtectionDomain protectionDomain,
+                            byte[] classfileBuffer) {
+        // 只处理ProducerApplication类
+        if (!className.endsWith("ProducerApplication")) {
+            return classfileBuffer;
+        }
+
+        // 好像使用premain这个className是没问题的，但使用attach时className的.变成了/，
+        // 所以如果是attach，那么这里需要替换
+        className = className.replace('/', '.');
+        System.out.println(className);
+
+        // 通过javasssist，在函数执行前后注入信息
+        try {
+            ClassPool classPool = ClassPool.getDefault();
+            CtClass ctClass = classPool.get(className);
+            CtMethod[] declaredMethods = ctClass.getDeclaredMethods();
+            for (CtMethod declaredMethod : declaredMethods) {
+                // 只处理produceProduct方法
+                if (Objects.equals("produceProduct", declaredMethod.getName())) {
+                    System.out.println("insert code ...");
+                    //  在方法执行之前加入打印语句
+                    declaredMethod.insertBefore("System.out.println(\"开始生产...\");");
+                    // 打印所有入参
+                    declaredMethod.insertBefore("System.out.println($$);");
+                    // 在方法执行之后加入打印语句
+                    declaredMethod.insertAfter("System.out.println(\"生产结束\");");
+                    // 打印所有返回结果
+                    declaredMethod.insertAfter("System.out.println($_);");
+                }
+            }
+            return ctClass.toBytecode();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return classfileBuffer;
+    }
+}
+```
+
+- AttachAgent.java通过` instrumentation.addTransformer(``**new **``ProducerTransformer(), ``**true**)`,把ProducerTransformer添加到instrumentation中。然后，通过 `instrumentation.retransformClasses(clazz)` 对ProducerApplication应用类进行转换。
+```java
+public class AttachAgent {
+    /**
+     * 注意：agentmain的方法签名也是约定好的，不能随意修改
+     * 其实如果要支持premain和attach两种方式的话，可以把premain和agentmain两个方法写在一个类里
+     */
+    public static void agentmain(String agentArgs, Instrumentation instrumentation) {
+        String targetClassPath = "ProducerApplication";
+        for (Class<?> clazz : instrumentation.getAllLoadedClasses()) {
+            // 过滤掉不能修改的类
+            if (!instrumentation.isModifiableClass(clazz)) {
+                continue;
+            }
+
+            // 这里只修改我们关心的类
+            if (clazz.getName().equals(targetClassPath)) {
+                // 最根本的目的还是把ProducerTransformer添加到instrumentation中
+                instrumentation.addTransformer(new ProducerTransformer(), true);
+                try {
+                    instrumentation.retransformClasses(clazz);
+                } catch (UnmodifiableClassException e) {
+                    e.printStackTrace();
+                }
+                //找到ProducerApplication后，处理结束后，不再后续遍历
+                return;
+            }
+        }
+    }
+}
+```
+
+<a name="vBG68"></a>
+## 执行注入模块：agentmain-attach-main
+```java
+agentmain-attach-main
+├── pom.xml
+├── src
+│   ├── main
+│   │   ├── java
+│   │   │   └── com
+│   │   │       └── danieljyc
+│   │   │           └── agent
+│   │   │               └── attach
+│   │   │                   └── AttachMain.java
+```
+其中，AttachMain.java 如下
+```java
+public class AttachMain {
+    public static void main(String[] args) {
+        // ProducerApplication的jvm进程ID
+        String jvmPid = "19582";
+
+        File agentFile = new File("/Users/daniel/gitworkspace/agent/agentmain-demo/agentmain-attach/target/agentmain-attach-1.0-SNAPSHOT-jar-with-dependencies.jar");
+
+        if (!agentFile.isFile()) {
+            System.out.println("jar 不存在");
+            return;
+        }
+
+        try {
+            VirtualMachine jvm = VirtualMachine.attach(jvmPid);
+            jvm.loadAgent(agentFile.getAbsolutePath());
+            jvm.detach();
+            System.out.println("attach 成功");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        try {
+            TimeUnit.SECONDS.sleep(10000);
+        } catch (InterruptedException e) {
+        }
+    }
+}
+```
+<a name="zJO9D"></a>
+## 执行
+
+- 在IDEA中执行 `ProducerApplication#main`
+```
+生产完成1 件。
+生产完成2 件。
+生产完成3 件。
+生产完成4 件。
+生产完成5 件。
+
+```
+
+- `jvmPid` 通过 `jps` 命令获取pid为2773
+```
+╰─$ jps
+2580 RemoteMavenServer36
+2772 Launcher
+2773 ProducerApplication
+2780 Jps
+2191
+```
+
+- 打包agent
+```
+cd agentmain-attach
+mvn clean package
+```
+
+- 在IDEA中执行AttachMain，动态加载agent，并动态attach到ProducerApplication代码中。
+  - AttachMain.main执行结果
+```
+attach 成功
+```
+
+  - 此时，ProducerApplication结果变为
+```shell
+生产完成210 件。
+生产完成211 件。
+生产完成212 件。
+ProducerApplication
+insert code ...
+
+ProductModel{id=213, code='pcode', name='pname'}
+开始生产...
+生产完成213 件。
+生产结束
+null
+
+ProductModel{id=214, code='pcode', name='pname'}
+开始生产...
+生产完成214 件。
+生产结束
+null
+```
+
+<a name="2hwmn"></a>
+# 参考
+
+- [Javassist 使用指南系列](https://www.jianshu.com/p/43424242846b)
